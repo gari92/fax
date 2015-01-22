@@ -1,0 +1,490 @@
+//Ucitavanje OBJ modela, Gouraud shading
+#include "StdAfx.h"
+#pragma comment(lib,"glew32.lib")
+#pragma comment(lib,"glut32.lib")
+#pragma comment(lib,"soil.lib")
+#pragma comment(lib,"nvModel.lib")
+
+
+#include "glew.h"
+#include "glut.h"
+#include "stdlib.h"
+#include "shader.h"
+#include "soil.h"
+
+#include "glm/glm.hpp"
+using glm::mat4;
+using glm::vec3;
+using glm::vec4;
+using glm::mat3;
+#include "glm/gtc/matrix_transform.hpp"
+#include "glm/gtx/transform2.hpp"
+
+//Novo za ucitavanje OBJ modela
+#include "nvModel.h"
+#include "nvSDKPath.h"
+
+GLuint p,p1;
+GLuint tekstura;
+GLuint g_vboId, g_eboId;
+GLuint vaoHandle;
+GLuint positionBufferHandle,colorBufferHandle,texBufferHandle,norBufferHandle;
+
+ nv::Model * g_model;//Za OBJ loader
+ static nv::SDKPath sdkPath;
+
+ void LoadModel(const char *model_filename)//Ucitaj OBJ model
+{
+	g_model = new nv::Model;
+	printf("loading OBJ...\n");
+
+    std::string resolved_path;
+
+    
+	 if (sdkPath.getFilePath( model_filename, resolved_path)) {
+	    if (!g_model->loadModelFromFile(resolved_path.c_str())) {
+		    fprintf(stderr, "Error loading model '%s'\n", model_filename);
+		    exit(1);
+	    }
+    }
+   
+    else {
+        fprintf(stderr, "Failed to find model '%s'\n", model_filename);
+		exit(1);
+    }
+
+	g_model->compileModel();
+	int totalVertexSize = g_model->getCompiledVertexCount() * g_model->getCompiledVertexSize() * sizeof(GLfloat);
+	int totalIndexSize = g_model->getCompiledIndexCount() * sizeof(GLuint);
+	
+	glGenBuffers(1, &g_vboId);
+	glBindBuffer(GL_ARRAY_BUFFER, g_vboId);
+    glBufferData(GL_ARRAY_BUFFER, totalVertexSize, g_model->getCompiledVertices(), GL_STATIC_DRAW);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+	glGenBuffers(1, &g_eboId);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_eboId);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, totalIndexSize, g_model->getCompiledIndices(), GL_STATIC_DRAW);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+	
+	glBindBuffer(GL_ARRAY_BUFFER, g_vboId);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_eboId);
+	int stride = g_model->getCompiledVertexSize() * sizeof(GLfloat);
+	glEnableVertexAttribArray(0); // Vertex position
+	glEnableVertexAttribArray(1); // Vertex normal
+	glEnableVertexAttribArray(2); // Vertex texkord
+
+	glVertexAttribPointer( 0,3, GL_FLOAT, GL_FALSE, stride,(const GLbyte*)0 );
+	glVertexAttribPointer( 1,3, GL_FLOAT, GL_FALSE, stride,(const GLbyte*)12 );
+	glVertexAttribPointer( 2,2, GL_FLOAT, GL_FALSE,stride,(const GLbyte*)24 );
+	glBindBuffer(GL_ARRAY_BUFFER,0 );
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+	
+ }
+
+ GLuint renderTex;
+GLuint fboHandle; // The handle to the FBO
+GLuint FramebufferName;
+GLuint renderedTexture;
+GLuint g_frontColorBlenderTexId,g_frontColorBlenderFboId,g_frontDepthTexId;
+GLuint color_tex,depth_tex,norm_tex,fb,depth_rb;
+
+
+void InitShader(){
+
+	//Generisi 3 teksture u koje ce zapisivati FBO
+   glGenTextures(1, &color_tex);//tekstura za osencen model
+   glBindTexture(GL_TEXTURE_2D, color_tex);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 512, 512, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+   
+   glGenTextures(1, &depth_tex);//depth tekstura
+   glBindTexture(GL_TEXTURE_2D, depth_tex);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 512, 512, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+
+   glGenTextures(1, &norm_tex);//normal tekstura
+   glBindTexture(GL_TEXTURE_2D, norm_tex);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 512, 512, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+
+   
+   //Generisi FBO
+   glGenFramebuffersEXT(1, &fb);
+   glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fb);
+   //Dodeli mu prethodne 3 teksture na pozicije 0, 1 i 2
+   glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_2D, color_tex, 0);
+   glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT1_EXT, GL_TEXTURE_2D, depth_tex, 0);
+   glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT2_EXT, GL_TEXTURE_2D, norm_tex, 0);
+   
+   //Za poredjenje depth vrednosti
+   glGenRenderbuffersEXT(1, &depth_rb);
+   glBindRenderbufferEXT(GL_RENDERBUFFER_EXT, depth_rb);
+   glRenderbufferStorageEXT(GL_RENDERBUFFER_EXT, GL_DEPTH_COMPONENT24, 512, 512);
+   
+   //dodeli bafee za poredjenje depth vrednosti FBO
+   glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_DEPTH_ATTACHMENT_EXT, GL_RENDERBUFFER_EXT, depth_rb);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	LoadModel("bs_rest.obj");//Standardno ucitaj model
+	
+	
+	int width, height;
+	//Ucitaj sliku za teksturu
+	unsigned char* image = SOIL_load_image("diffuse.png", &width, &height, 0, SOIL_LOAD_RGB);
+
+	glGenTextures(1,&tekstura);
+	glBindTexture(GL_TEXTURE_2D,tekstura);
+
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	   
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB,GL_UNSIGNED_BYTE, image);
+	glBindTexture(GL_TEXTURE_2D,0);
+
+//Aktiviraj teksturu za model
+glActiveTexture(GL_TEXTURE3);
+glBindTexture(GL_TEXTURE_2D, tekstura);
+
+
+
+	//Shader za rendering modela u FBO p
+	GLuint v, f;
+    char *vs, *fs;
+ 
+    v = glCreateShader(GL_VERTEX_SHADER);
+    f = glCreateShader(GL_FRAGMENT_SHADER);
+ 
+    vs = textFileRead("shaderphong.vert");
+    fs = textFileRead("shaderphong.frag");
+ 
+    const char * vv = vs;
+    const char * ff = fs;
+    glShaderSource(v, 1, &vv,NULL);
+    glShaderSource(f, 1, &ff,NULL);
+ 
+    free(vs);
+	free(fs);
+    glCompileShader(v);
+    glCompileShader(f);
+    p = glCreateProgram();
+    glAttachShader(p,v);
+    glAttachShader(p,f);
+	glBindAttribLocation(p, 0, "VertexPosition");
+	glBindAttribLocation(p, 1, "Norm");
+	glBindAttribLocation(p, 2, "VertexTex");
+	
+	
+
+	
+    glLinkProgram(p);
+  
+	printShaderInfoLog(v);
+	printShaderInfoLog(f);
+	printProgramInfoLog(p);
+
+
+	GLuint v1, f1,g1;
+    char *vs1, *fs1,*gs1;
+ 
+    v1 = glCreateShader(GL_VERTEX_SHADER);
+    f1 = glCreateShader(GL_FRAGMENT_SHADER);
+	g1 = glCreateShader(GL_GEOMETRY_SHADER);//Geometry shader
+     
+    vs1 = textFileRead("shadergeom.vert");
+    fs1 = textFileRead("shadergeom.frag");
+	gs1 = textFileRead("shader.geom");//fajl za Geometry shader
+ 
+    const char * vv1 = vs1;
+    const char * ff1 = fs1;
+	const char * gg1 = gs1;
+    glShaderSource(v1, 1, &vv1,NULL);
+    glShaderSource(f1, 1, &ff1,NULL);
+	glShaderSource(g1, 1, &gg1,NULL);
+ 
+    free(vs1);
+	free(fs1);
+	free(gs1);
+    glCompileShader(v1);
+    glCompileShader(f1);
+	glCompileShader(g1);//Kompajliramo geometry shader
+    p1 = glCreateProgram();
+    glAttachShader(p1,v1);
+	glAttachShader(p1,f1);
+	glAttachShader(p1,g1);//Dodajemo geometry shader programu
+	glBindAttribLocation(p1, 0, "VertexPosition");//Atributi koje prosledjujemo za teme su isti
+	glBindAttribLocation(p1, 1, "Norm");
+	glBindAttribLocation(p1, 2, "VertexTex");
+	
+	
+    glLinkProgram(p1);
+  
+	printShaderInfoLog(v1);
+	printShaderInfoLog(f1);
+	printShaderInfoLog(g1);
+	printProgramInfoLog(p1);
+
+
+}
+
+GLfloat rotx,roty,rotz;
+float ugao;
+
+int dd=0;
+
+void display (void)
+{
+	ugao+=0.002;
+	glUseProgram(p);//Primeni Shader
+		
+		
+	mat4 model;
+    mat4 view;
+    mat4 projection;
+	
+	//Matrice trasformacija
+	model = mat4(1.0f);
+	
+	view = mat4(1.0f);
+	view = glm::lookAt(vec3(0.0,0.0,2.0),vec3(0.0,0.0,0.0),vec3(0.0,1.0,0.0)) ;
+   
+	projection = mat4(1.0f);
+	projection=glm::perspective(60.0,1024.0/768.0,1.0,50.0);
+
+	model=model*glm::rotate(rotx,vec3(1.0,0.0,0.0));
+	model=model*glm::rotate(roty,vec3(0.0,1.0,0.0));
+	model=model*glm::rotate(rotz,vec3(0.0,0.0,1.0));
+
+	mat4 mv = view * model;
+	mat4 mvp = projection*mv;
+	mat3 normal=mat3( vec3(mv[0]), vec3(mv[1]), vec3(mv[2]));//Matrica za transformaciju normale u View K.S.
+
+	//Parametri materijala i svetla	
+	vec3 kd=vec3(0.7f,0.7f,0.7f);
+	vec3 ld=vec3(0.8f, 0.8f, 0.8f);
+	vec3 ka=vec3(0.7f, 0.7f, 0.7f);
+	vec3 la=vec3(0.4f, 0.4f, 0.4f);
+	vec3 ks=vec3(0.8f, 0.8f, 0.8f);
+	vec3 ls=vec3(0.9f, 0.9f, 0.9f);
+	float sh=90.0f;
+	vec4 ligpos;
+	
+	ligpos=vec4(0.0f,0.0f,3.0f,1.0);
+	
+	//ligpos=vec4(3.0f*cos(ugao),0.0f,3.0f*sin(ugao),1.0);//Za rotaciju svetla
+	
+	
+	ligpos=view*ligpos;//Pozicija svetla u K.S. pogleda
+	
+	
+
+	
+	
+	GLuint location =glGetUniformLocation(p,"Model");
+	glUniformMatrix4fv(location, 1, GL_FALSE,&model[0][0]);
+	
+	location = glGetUniformLocation(p, "t");//Parametar za promenu tekstura
+	glUniform1i(location, dd);
+
+	location =glGetUniformLocation(p,"View");
+	glUniformMatrix4fv(location, 1, GL_FALSE,&view[0][0]);
+
+	location =glGetUniformLocation(p,"Projection");
+	glUniformMatrix4fv(location, 1, GL_FALSE,&projection[0][0]);
+
+	location =glGetUniformLocation(p,"Normal");
+	glUniformMatrix3fv(location, 1, GL_FALSE,&normal[0][0]);
+
+	location =glGetUniformLocation(p,"Light.Position");
+	glUniform4fv(location,1,(float*)&ligpos);
+
+	location =glGetUniformLocation(p,"Material.Kd");
+	glUniform3fv(location,1,(float*)&kd);
+
+	location =glGetUniformLocation(p,"Light.Ld");
+	glUniform3fv(location,1,(float*)&ld);
+
+	location =glGetUniformLocation(p,"Material.Ka");
+	glUniform3fv(location,1,(float*)&ka);
+
+	location =glGetUniformLocation(p,"Light.La");
+	glUniform3fv(location,1,(float*)&la);
+
+	location =glGetUniformLocation(p,"Material.Ks");
+	glUniform3fv(location,1,(float*)&ks);
+
+	location =glGetUniformLocation(p,"Light.Ls");
+	glUniform3fv(location,1,(float*)&ls);
+
+	location =glGetUniformLocation(p,"Material.Shininess");
+	glUniform1fv(location,1,(float*)&sh);
+
+
+	location = glGetUniformLocation(p, "texUnit");
+	glUniform1i(location, 0);
+
+	location = glGetUniformLocation(p, "texUnit1");
+	glUniform1i(location, 1);
+
+	location = glGetUniformLocation(p, "texUnit2");
+	glUniform1i(location, 2);
+
+	
+	
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+	glClearColor(1.0,1.0,1.0,1.0);
+
+	//Iscrtaj model
+	glBindBuffer(GL_ARRAY_BUFFER, g_vboId);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_eboId);
+	glDrawElements(GL_TRIANGLES, g_model->getCompiledIndexCount(), GL_UNSIGNED_INT, NULL);
+
+
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, color_tex);
+
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, depth_tex);
+
+	glActiveTexture(GL_TEXTURE2);
+	glBindTexture(GL_TEXTURE_2D, norm_tex);
+	
+	//Aktiviramo iscrtavanje na ekran 
+	glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+
+
+	glUseProgram(p1);//Primeni Shader za iscrtavanje normala
+
+	
+	 location =glGetUniformLocation(p1,"Model");
+	glUniformMatrix4fv(location, 1, GL_FALSE,&model[0][0]);
+	
+	location =glGetUniformLocation(p1,"View");
+	glUniformMatrix4fv(location, 1, GL_FALSE,&view[0][0]);
+
+	location =glGetUniformLocation(p1,"Projection");
+	glUniformMatrix4fv(location, 1, GL_FALSE,&projection[0][0]);
+
+	
+	//Iscrtaj isti model
+	glBindBuffer(GL_ARRAY_BUFFER, g_vboId);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_eboId);
+	glDrawElements(GL_TRIANGLES, g_model->getCompiledIndexCount(), GL_UNSIGNED_INT, NULL);
+	
+	glutSwapBuffers();
+	glutPostRedisplay();
+	
+}
+
+void keyboard(unsigned char key,int x,int y)
+{
+	
+	switch(key)
+	{
+		case 'a':
+			rotx+=0.5;
+			break;
+		case 'z':
+			rotx-=0.5;
+			break;
+		case 'n':
+			roty+=0.5;
+			break;
+		case 'm':
+			roty-=0.5;
+			break;
+
+		case 'q':
+			rotz+=0.5;
+			break;
+		case 'w':
+			rotz-=0.5;
+			break;
+
+		case 'p':
+			dd+=1;
+			break;
+
+		case 'o':
+			dd-=1;
+			break;
+		
+	}
+	
+}
+
+
+int main(int argc , char ** argv)
+{
+
+glutInit (&argc , argv);
+glutInitWindowSize(1024, 768);
+glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE|GLUT_DEPTH);
+glutCreateWindow("Osvetljenje shader-i");
+glutDisplayFunc(display );
+glutKeyboardFunc(keyboard);
+
+GLenum err = glewInit();
+printf( "VENDOR = %s\n", glGetString( GL_VENDOR ));
+printf("RENDERER = %s\n", glGetString( GL_RENDERER ));
+printf("VERSION = %s\n", glGetString( GL_VERSION ));
+ 
+if(glewGetExtension("GL_ARB_geometry_shader4")){
+
+	printf("Podrzan geometry shader\n");
+
+}
+if(glewGetExtension("GL_ARB_vertex_shader")){
+
+	printf("Podrzan vertex shader\n");
+
+}
+if(glewGetExtension("GL_ARB_fragment_shader")){
+
+	printf("Podrzan fragment shader\n");
+
+}
+
+
+if( GLEW_OK != err )
+{
+printf("Error initializing GLEW: %s\n",glewGetErrorString(err));
+}
+
+const GLubyte *renderer = glGetString( GL_RENDERER );
+const GLubyte *vendor = glGetString( GL_VENDOR );
+const GLubyte *version = glGetString( GL_VERSION );
+const GLubyte *glslVersion =
+glGetString( GL_SHADING_LANGUAGE_VERSION );
+GLint major, minor;
+glGetIntegerv(GL_MAJOR_VERSION, &major);
+glGetIntegerv(GL_MINOR_VERSION, &minor);
+printf("GL Vendor : %s\n", vendor);
+printf("GL Renderer : %s\n", renderer);
+printf("GL Version (string) : %s\n", version);
+printf("GL Version (integer) : %d.%d\n", major, minor);
+printf("GLSL Version : %s\n", glslVersion);
+
+InitShader();
+
+glEnable(GL_DEPTH_TEST);
+
+glutMainLoop();
+
+
+
+}
+
